@@ -1,123 +1,71 @@
-import os
-import subprocess
-import uuid
-
-import requests
 import runpod
-
-
-def download_image(image_url: str, output_path: str) -> None:
-    response = requests.get(image_url, timeout=30)
-    response.raise_for_status()
-
-    with open(output_path, "wb") as f:
-        f.write(response.content)
-
-
-def build_video_from_image(
-    image_path: str,
-    output_path: str,
-    width: int,
-    height: int,
-    duration_seconds: int,
-    fps: int,
-) -> None:
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-loop", "1",
-        "-i", image_path,
-        "-t", str(duration_seconds),
-        "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
-        "-r", str(fps),
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        output_path,
-    ]
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed: {result.stderr}")
-
+import requests
+import tempfile
+import subprocess
+import base64
+import os
 
 def handler(event):
     data = event.get("input", {})
 
     image_url = data.get("image")
-    prompt = data.get("prompt", "")
-    video_format = data.get("format", "vertical")
-    duration_seconds = int(data.get("duration_seconds", 5))
+    duration = int(data.get("duration_seconds", 5))
+    fps = int(data.get("fps", 8))
 
     if not image_url:
-        return {
-            "status": "error",
-            "message": "No image URL provided",
-            "received_input": data
-        }
+        return {"status": "error", "message": "No image provided"}
 
-    if video_format not in ["vertical", "horizontal"]:
-        video_format = "vertical"
+    # -------------------------
+    # Bild herunterladen
+    # -------------------------
+    img_response = requests.get(image_url)
+    if img_response.status_code != 200:
+        return {"status": "error", "message": "Image download failed"}
 
-    if duration_seconds not in [3, 5, 8, 10]:
-        duration_seconds = 5
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as img_file:
+        img_file.write(img_response.content)
+        img_path = img_file.name
 
-    if video_format == "vertical":
-        width, height = 720, 1280
-    else:
-        width, height = 1280, 720
+    # -------------------------
+    # Output Video
+    # -------------------------
+    output_path = tempfile.mktemp(suffix=".mp4")
 
-    fps = 8
-    target_frames = duration_seconds * fps
-
-    job_id = uuid.uuid4().hex
-    image_path = f"/tmp/input_{job_id}.png"
-    output_path = f"/tmp/output_{job_id}.mp4"
-
+    # -------------------------
+    # FFmpeg Video erstellen
+    # -------------------------
     try:
-        download_image(image_url, image_path)
-        build_video_from_image(
-            image_path=image_path,
-            output_path=output_path,
-            width=width,
-            height=height,
-            duration_seconds=duration_seconds,
-            fps=fps,
-        )
-
-        if not os.path.exists(output_path):
-            return {
-                "status": "error",
-                "message": "Video file was not created"
-            }
-
-        video_size = os.path.getsize(output_path)
-
-        return {
-            "status": "ok",
-            "message": "Dummy video created successfully",
-            "image_url": image_url,
-            "prompt": prompt,
-            "format": video_format,
-            "duration_seconds": duration_seconds,
-            "fps": fps,
-            "target_frames": target_frames,
-            "target_width": width,
-            "target_height": height,
-            "video_path": output_path,
-            "video_size_bytes": video_size
-        }
+        subprocess.run([
+            "ffmpeg",
+            "-loop", "1",
+            "-i", img_path,
+            "-c:v", "libx264",
+            "-t", str(duration),
+            "-pix_fmt", "yuv420p",
+            "-vf", f"fps={fps}",
+            output_path
+        ], check=True)
 
     except Exception as e:
         return {
             "status": "error",
-            "message": str(e),
-            "image_url": image_url
+            "message": f"FFmpeg failed: {str(e)}"
         }
 
-    finally:
-        if os.path.exists(image_path):
-            os.remove(image_path)
+    # -------------------------
+    # Video Base64 zurückgeben
+    # -------------------------
+    with open(output_path, "rb") as f:
+        video_bytes = f.read()
+
+    video_base64 = base64.b64encode(video_bytes).decode("utf-8")
+
+    return {
+        "status": "ok",
+        "message": "REAL video created",
+        "video_base64": video_base64,
+        "video_filename": f"job_{os.path.basename(output_path)}"
+    }
 
 
 runpod.serverless.start({"handler": handler})
